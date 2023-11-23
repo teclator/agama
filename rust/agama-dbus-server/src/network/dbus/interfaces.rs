@@ -2,16 +2,21 @@
 //!
 //! This module contains the set of D-Bus interfaces that are exposed by [D-Bus network
 //! service](crate::NetworkService).
+use std::collections::HashMap;
+
 use super::ObjectsRegistry;
 use crate::network::{
     action::Action,
     error::NetworkStateError,
-    model::{Connection as NetworkConnection, Device as NetworkDevice, WirelessConnection},
+    model::{
+        BondConnection, Connection as NetworkConnection, Device as NetworkDevice,
+        WirelessConnection,
+    },
 };
 
 use agama_lib::network::types::SSID;
 use std::sync::Arc;
-use tokio::sync::mpsc::UnboundedSender;
+use tokio::sync::{mpsc::UnboundedSender, oneshot};
 use tokio::sync::{MappedMutexGuard, Mutex, MutexGuard};
 use zbus::{
     dbus_interface,
@@ -281,6 +286,117 @@ impl Match {
     }
 }
 
+/// D-Bus interface for Bond settings
+pub struct Bond {
+    actions: Arc<Mutex<UnboundedSender<Action>>>,
+    connection: Arc<Mutex<NetworkConnection>>,
+}
+
+impl Bond {
+    /// Creates a Match Settings interface object.
+    ///
+    /// * `actions`: sending-half of a channel to send actions.
+    /// * `connection`: connection to expose over D-Bus.
+    pub fn new(
+        actions: UnboundedSender<Action>,
+        connection: Arc<Mutex<NetworkConnection>>,
+    ) -> Self {
+        Self {
+            actions: Arc::new(Mutex::new(actions)),
+            connection,
+        }
+    }
+
+    /// Gets the bond connection.
+    ///
+    /// Beware that it crashes when it is not a bond connection.
+    async fn get_bond(&self) -> MappedMutexGuard<BondConnection> {
+        MutexGuard::map(self.connection.lock().await, |c| match c {
+            NetworkConnection::Bond(config) => config,
+            _ => panic!("Not a bond connection. This is most probably a bug."),
+        })
+    }
+
+    /// Updates the controller connection data in the NetworkSystem.
+    ///
+    /// * `connection`: Updated connection.
+    async fn update_controller_connection<'a>(
+        &self,
+        connection: MappedMutexGuard<'a, BondConnection>,
+        settings: HashMap<String, ControllerSettings>,
+    ) -> Result<crate::network::model::Connection, NetworkStateError> {
+        let actions = self.actions.lock().await;
+        let connection = NetworkConnection::Bond(connection.clone());
+        let (tx, rx) = oneshot::channel();
+        actions
+            .send(Action::UpdateControllerConnection(connection, settings, tx))
+            .unwrap();
+
+        rx.await.unwrap()
+    }
+}
+
+#[derive(Debug, PartialEq, Clone)]
+pub enum ControllerSettings {
+    Ports(Vec<String>),
+    Options(String),
+}
+
+#[dbus_interface(name = "org.opensuse.Agama1.Network.Connection.Bond")]
+impl Bond {
+    /// List of bond ports.
+    #[dbus_interface(property)]
+    pub async fn options(&self) -> String {
+        let connection = self.get_bond().await;
+
+        connection.bond.options.to_string()
+    }
+
+    #[dbus_interface(property)]
+    pub async fn set_options(&mut self, opts: String) -> zbus::fdo::Result<()> {
+        let connection = self.get_bond().await;
+        let result = self
+            .update_controller_connection(
+                connection,
+                HashMap::from([(
+                    "options".to_string(),
+                    ControllerSettings::Options(opts.clone()),
+                )]),
+            )
+            .await;
+        self.connection = Arc::new(Mutex::new(result.unwrap()));
+        Ok(())
+    }
+
+    /// List of bond ports.
+    #[dbus_interface(property)]
+    pub async fn ports(&self) -> Vec<String> {
+        let connection = self.get_bond().await;
+        connection
+            .bond
+            .ports
+            .iter()
+            .map(|port| port.base().id.to_string())
+            .collect()
+    }
+
+    #[dbus_interface(property)]
+    pub async fn set_ports(&mut self, ports: Vec<String>) -> zbus::fdo::Result<()> {
+        let connection = self.get_bond().await;
+        let result = self
+            .update_controller_connection(
+                connection,
+                HashMap::from([(
+                    "ports".to_string(),
+                    ControllerSettings::Ports(ports.clone()),
+                )]),
+            )
+            .await;
+        self.connection = Arc::new(Mutex::new(result.unwrap()));
+        Ok(())
+    }
+}
+
 #[dbus_interface(name = "org.opensuse.Agama1.Network.Connection.Match")]
 impl Match {
     /// List of driver names to match.
@@ -462,7 +578,6 @@ impl Wireless {
         connection.wireless.security = security
             .try_into()
             .map_err(|_| NetworkStateError::InvalidSecurityProtocol(security.to_string()))?;
-        self.update_connection(connection).await?;
-        Ok(())
+        self.update_connection(connection).await
     }
 }

@@ -3,6 +3,13 @@ use std::{fmt, str};
 use thiserror::Error;
 use zbus;
 
+/// Network device
+#[derive(Debug, Clone)]
+pub struct Device {
+    pub name: String,
+    pub type_: DeviceType,
+}
+
 #[derive(Debug, Default, PartialEq, Clone, Serialize, Deserialize)]
 pub struct SSID(pub Vec<u8>);
 
@@ -24,11 +31,12 @@ impl From<SSID> for Vec<u8> {
     }
 }
 
-#[derive(Debug, PartialEq, Copy, Clone)]
+#[derive(Debug, PartialEq, Copy, Clone, Serialize, Deserialize)]
 pub enum DeviceType {
     Loopback = 0,
     Ethernet = 1,
     Wireless = 2,
+    Bond = 3,
 }
 
 #[derive(Debug, Error, PartialEq)]
@@ -43,6 +51,7 @@ impl TryFrom<u8> for DeviceType {
             0 => Ok(DeviceType::Loopback),
             1 => Ok(DeviceType::Ethernet),
             2 => Ok(DeviceType::Wireless),
+            3 => Ok(DeviceType::Bond),
             _ => Err(InvalidDeviceType(value)),
         }
     }

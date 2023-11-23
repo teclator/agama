@@ -73,6 +73,16 @@ impl<T: Adapter> NetworkSystem<T> {
             Action::UpdateConnection(conn) => {
                 self.state.update_connection(conn)?;
             }
+            Action::UpdateControllerConnection(conn, settings, tx) => {
+                let id = &conn.clone();
+                let id = id.id();
+                self.state.update_controller_connection(conn, settings)?;
+                if let Some(conn) = self.state.get_connection(id) {
+                    tx.send(Ok(conn.clone())).unwrap();
+                }
+
+                dbg!(&self.state.connections);
+            }
             Action::RemoveConnection(id) => {
                 self.tree.remove_connection(&id).await?;
                 self.state.remove_connection(&id)?;
